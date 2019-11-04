@@ -282,32 +282,32 @@ void TxnProcessor::ApplyWrites(Txn *txn) {
 /**
  * Precondition: No storage writes are occuring during execution.
  */
-bool TxnProcessor::OCCValidateTransaction(const Txn &txn) const {
-    // Validation phase
-
-    // each record whose key appears in the txn's write sets
-    for(auto& [k, v]: txn.writeset_) {
-        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
-    }
-
-    // each record whose key appears in the txn's read sets
-    for(auto& [k, v]: txn.readset_) {
-        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
-    }
-
-    /*
-     * for (each txn t in the txn's copy of the active set) {
-        if (txn's write set intersects with t's read or write sets) {
-          Validation fails!
-        }
-        if (txn's read set intersects with t's write sets) {
-          Validation fails!
-        }
-      }
-     */
-
-    return true;
-}
+//bool TxnProcessor::OCCValidateTransaction(const Txn &txn) const {
+//    // Validation phase
+//
+//    // each record whose key appears in the txn's write sets
+//    for(auto& [k, v]: txn.writeset_) {
+//        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
+//    }
+//
+//    // each record whose key appears in the txn's read sets
+//    for(auto& [k, v]: txn.readset_) {
+//        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
+//    }
+//
+//    /*
+//     * for (each txn t in the txn's copy of the active set) {
+//        if (txn's write set intersects with t's read or write sets) {
+//          Validation fails!
+//        }
+//        if (txn's read set intersects with t's write sets) {
+//          Validation fails!
+//        }
+//      }
+//     */
+//
+//    return true;
+//}
 
 void TxnProcessor::RunOCCScheduler() {
     // Fetch transaction requests, and immediately begin executing them.
@@ -327,7 +327,33 @@ void TxnProcessor::RunOCCScheduler() {
             if (finished->Status() == COMPLETED_A) {
                 finished->status_ = ABORTED;
             } else {
-                if (OCCValidateTransaction(*finished)) {
+
+                // Validation phase
+
+                bool validation = true;
+
+                // each record whose key appears in the txn's write sets
+                for(auto& [k, v]: txn.writeset_) {
+                    if (txn.occ_start_time_ < storage_->Timestamp(k)) validation = false;
+                }
+
+                // each record whose key appears in the txn's read sets
+                for(auto& [k, v]: txn.readset_) {
+                    if (txn.occ_start_time_ < storage_->Timestamp(k)) validation = false;
+                }
+
+                /*
+                 * for (each txn t in the txn's copy of the active set) {
+                    if (txn's write set intersects with t's read or write sets) {
+                      Validation fails!
+                    }
+                    if (txn's read set intersects with t's write sets) {
+                      Validation fails!
+                    }
+                  }
+                 */
+
+                if (validation) {
                     // Commit the transaction
                     ApplyWrites(finished);
                     finished->status_ = COMMITTED;
