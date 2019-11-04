@@ -326,6 +326,7 @@ void TxnProcessor::RunOCCScheduler() {
         while (completed_txns_.Pop(&finished)) {
             if (finished->Status() == COMPLETED_A) {
                 finished->status_ = ABORTED;
+                txn_results_.Push(finished);
             } else {
 
                 // Validation phase
@@ -357,6 +358,7 @@ void TxnProcessor::RunOCCScheduler() {
                     // Commit the transaction
                     ApplyWrites(finished);
                     finished->status_ = COMMITTED;
+                    txn_results_.Push(finished);
 
                 } else {
 
@@ -373,8 +375,6 @@ void TxnProcessor::RunOCCScheduler() {
                     mutex_.Unlock();
                 }
             }
-
-            txn_results_.Push(finished);
         }
     }
 }
