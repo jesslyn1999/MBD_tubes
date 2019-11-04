@@ -97,11 +97,11 @@ void TxnProcessor::RunSerialScheduler() {
             // Commit/abort txn according to program logic's commit/abort decision.
             if (txn->Status() == COMPLETED_C) {
                 ApplyWrites(txn);
-                cout << "COMITTED";
+//                cout << "COMITTED";
                 txn->status_ = COMMITTED;
             } else if (txn->Status() == COMPLETED_A) {
                 txn->status_ = ABORTED;
-                cout << "ABORTED";
+//                cout << "ABORTED";
             } else {
                 // Invalid TxnStatus!
                 DIE("Completed Txn has invalid TxnStatus: " << txn->Status());
