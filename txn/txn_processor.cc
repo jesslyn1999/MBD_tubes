@@ -283,15 +283,16 @@ void TxnProcessor::ApplyWrites(Txn *txn) {
  * Precondition: No storage writes are occuring during execution.
  */
 bool TxnProcessor::OCCValidateTransaction(const Txn &txn) const {
-    // Check
-    for (auto &&key : txn.readset_) {
-        if (txn.occ_start_time_ < storage_->Timestamp(key))
-            return false;
+    // Validation phase
+
+    // each record whose key appears in the txn's write sets
+    for(auto& [k, v]: txn.writeset_) {
+        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
     }
 
-    for (auto &&key : txn.writeset_) {
-        if (txn.occ_start_time_ < storage_->Timestamp(key))
-            return false;
+    // each record whose key appears in the txn's read sets
+    for(auto& [k, v]: txn.readset_) {
+        if (txn.occ_start_time_ < storage_->Timestamp(k)) return false;
     }
 
     /*
@@ -320,28 +321,30 @@ void TxnProcessor::RunOCCScheduler() {
                     txn));
         }
 
-        // Validate completed transactions, serially
+        // Validate completed transactions in Serial OCC
         Txn *finished;
         while (completed_txns_.Pop(&finished)) {
             if (finished->Status() == COMPLETED_A) {
                 finished->status_ = ABORTED;
             } else {
-                bool valid = OCCValidateTransaction(*finished);
-                if (!valid) {
-                    // Cleanup and restart
+                if (OCCValidateTransaction(*finished)) {
+                    // Commit the transaction
+                    ApplyWrites(finished);
+                    finished->status_ = COMMITTED;
+
+                } else {
+
+                    // Cleanup txn
                     finished->reads_.empty();
                     finished->writes_.empty();
                     finished->status_ = INCOMPLETE;
 
+                    // Restart txn
                     mutex_.Lock();
                     txn->unique_id_ = next_unique_id_;
                     next_unique_id_++;
                     txn_requests_.Push(finished);
                     mutex_.Unlock();
-                } else {
-                    // Commit the transaction
-                    ApplyWrites(finished);
-                    finished->status_ = COMMITTED;
                 }
             }
 
