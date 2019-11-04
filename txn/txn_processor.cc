@@ -334,13 +334,13 @@ void TxnProcessor::RunOCCScheduler() {
                 bool validation = true;
 
                 // each record whose key appears in the txn's write sets
-                for(auto& [k, v]: txn.writeset_) {
-                    if (txn.occ_start_time_ < storage_->Timestamp(k)) validation = false;
+                for(set<Key>::iterator it =  finished->readset_.begin(); it != finished->readset_.end(); it++) {
+                    if (finished->occ_start_time_ < storage_->Timestamp(*it)) validation = false;
                 }
 
                 // each record whose key appears in the txn's read sets
-                for(auto& [k, v]: txn.readset_) {
-                    if (txn.occ_start_time_ < storage_->Timestamp(k)) validation = false;
+                for(set<Key>::iterator it =  finished->writeset_.begin(); it != finished->writeset_.end(); it++) {
+                    if (finished->occ_start_time_ < storage_->Timestamp(*it)) validation = false;
                 }
 
                 /*
