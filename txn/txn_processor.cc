@@ -1,8 +1,3 @@
-// Author: Alexander Thomson (thomson@cs.yale.edu)
-// Modified by: Christina Wallin (christina.wallin@yale.edu)
-// Modified by: Kun Ren (kun.ren@yale.edu)
-
-
 #include "txn/txn_processor.h"
 #include <stdio.h>
 #include <set>
@@ -13,14 +8,12 @@ using namespace std;
 #include "txn/lock_manager.h"
 
 // Thread & queue counts for StaticThreadPool initialization.
-#define THREAD_COUNT 8
+#define THREAD_COUNT 20
 
 TxnProcessor::TxnProcessor(CCMode mode)
         : mode_(mode), tp_(THREAD_COUNT), next_unique_id_(1) {
     if (mode_ == LOCKING_EXCLUSIVE_ONLY)
         lm_ = new LockManagerA(&ready_txns_);
-    else if (mode_ == LOCKING)
-        lm_ = new LockManagerB(&ready_txns_);
 
     // Create the storage
     if (mode_ == MVCC) {
@@ -36,13 +29,9 @@ TxnProcessor::TxnProcessor(CCMode mode)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset);
-    CPU_SET(1, &cpuset);
-    CPU_SET(2, &cpuset);
-    CPU_SET(3, &cpuset);
-    CPU_SET(4, &cpuset);
-    CPU_SET(5, &cpuset);
-    CPU_SET(6, &cpuset);
+    for (int i = 0; i < 19; i++) {
+        CPU_SET(i, &cpuset);
+    }
     pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpuset);
     pthread_t scheduler_;
     pthread_create(&scheduler_, &attr, StartScheduler, reinterpret_cast<void *>(this));
@@ -55,7 +44,7 @@ void *TxnProcessor::StartScheduler(void *arg) {
 }
 
 TxnProcessor::~TxnProcessor() {
-    if (mode_ == LOCKING_EXCLUSIVE_ONLY || mode_ == LOCKING)
+    if (mode_ == LOCKING_EXCLUSIVE_ONLY)
         delete lm_;
 
     delete storage_;
@@ -85,21 +74,15 @@ void TxnProcessor::RunScheduler() {
     switch (mode_) {
         case SERIAL:
             RunSerialScheduler();
-            break;
-        case LOCKING:
-            RunLockingScheduler();
-            break;
         case LOCKING_EXCLUSIVE_ONLY:
             RunLockingScheduler();
-            break;
+        case LOCKING:;
         case OCC:
             RunOCCScheduler();
-            break;
-        case P_OCC:
-            RunOCCParallelScheduler();
-            break;
+        case P_OCC:;
         case MVCC:
             RunMVCCScheduler();
+        default:;
     }
 }
 
@@ -333,12 +316,12 @@ void TxnProcessor::RunOCCScheduler() {
                 bool validation = true;
 
                 // each record whose key appears in the txn's write sets
-                for(set<Key>::iterator it =  finished->readset_.begin(); it != finished->readset_.end(); it++) {
+                for (set<Key>::iterator it = finished->readset_.begin(); it != finished->readset_.end(); it++) {
                     if (finished->occ_start_time_ < storage_->Timestamp(*it)) validation = false;
                 }
 
                 // each record whose key appears in the txn's read sets
-                for(set<Key>::iterator it =  finished->writeset_.begin(); it != finished->writeset_.end(); it++) {
+                for (set<Key>::iterator it = finished->writeset_.begin(); it != finished->writeset_.end(); it++) {
                     if (finished->occ_start_time_ < storage_->Timestamp(*it)) validation = false;
                 }
 
@@ -393,16 +376,106 @@ void TxnProcessor::RunOCCParallelScheduler() {
     RunSerialScheduler();
 }
 
+void TxnProcessor::MVCCExecuteTxn(Txn *txn) {
+    // read from storage, locking keys individually
+    for (set<Key>::iterator it = txn->readset_.begin(); it != txn->readset_.end(); ++it) {
+
+        // Lock key
+        storage_->Lock(*it);
+
+        // Save each read result iff record exists in storage.
+        Value result;
+        if (storage_->Read(*it, &result, txn->unique_id_)) {
+            txn->reads_[*it] = result;
+        }
+
+        // Unlock key
+        storage_->Unlock(*it);
+    }
+
+    // Read from writeset.
+    for (set<Key>::iterator it = txn->writeset_.begin(); it != txn->writeset_.end(); ++it) {
+
+        // Lock key
+        storage_->Lock(*it);
+
+        // Save each read result iff record exists in storage.
+        Value result;
+        if (storage_->Read(*it, &result, txn->unique_id_)) {
+            txn->reads_[*it] = result;
+        }
+
+        // Unlock key
+        storage_->Unlock(*it);
+    }
+
+    // Execute txn's program logic.
+    txn->Run();
+
+    // Lock the whole write-set
+    for (set<Key>::iterator it = txn->writeset_.begin(); it != txn->writeset_.end(); ++it) {
+        // Lock key
+        storage_->Lock(*it);
+    }
+
+    // Check if all keys in write set "pass"
+    bool failed = false;
+    for (map<Key, Value>::iterator it = txn->writes_.begin(); it != txn->writes_.end(); ++it) {
+        if (!storage_->CheckWrite(it->first, txn->unique_id_)) {
+            failed = true;
+            break;
+        }
+    }
+
+    if (!failed) {
+        // Apply all the writes
+        for (map<Key, Value>::iterator it = txn->writes_.begin(); it != txn->writes_.end(); ++it) {
+            storage_->Write(it->first, it->second, txn->unique_id_);
+        }
+        // Release all write set locks
+        for (set<Key>::iterator it = txn->writeset_.begin(); it != txn->writeset_.end(); ++it) {
+            storage_->Unlock(*it);
+        }
+        // Return result to client.
+        txn_results_.Push(txn);
+    } else {
+        MVCCAbortTransaction(txn);
+    }
+}
+
+void TxnProcessor::MVCCAbortTransaction(Txn *txn) {
+    // Release all write set locks
+    for (set<Key>::iterator it = txn->writeset_.begin();
+         it != txn->writeset_.end(); ++it) {
+        storage_->Unlock(*it);
+    }
+
+    // Clean up transaction
+    txn->reads_.clear();
+    txn->writes_.clear();
+    txn->status_ = INCOMPLETE;
+
+    // Restart transaction
+    mutex_.Lock();
+    txn->unique_id_ = next_unique_id_;
+    next_unique_id_++;
+    txn_requests_.Push(txn);
+    mutex_.Unlock();
+}
+
 void TxnProcessor::RunMVCCScheduler() {
-    // CPSC 438/538:
+    // CPSC 638:
     //
     // Implement this method!
 
     // Hint:Pop a txn from txn_requests_, and pass it to a thread to execute.
     // Note that you may need to create another execute method, like TxnProcessor::MVCCExecuteTxn.
-    //
-    // [For now, run serial scheduler in order to make it through the test
-    // suite]
-    RunSerialScheduler();
+    Txn *txn;
+    while (tp_.Active()) {
+        if (txn_requests_.Pop(&txn)) {
+            // Start txn running in its own thread.
+            tp_.RunTask(new Method<TxnProcessor, void, Txn *>(this, &TxnProcessor::MVCCExecuteTxn, txn));
+        }
+    }
 }
 
